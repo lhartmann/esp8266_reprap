@@ -15,9 +15,11 @@ I got the code from CNLohr on github, modified it to output a 32 bit counter (16
 - I2S Bitclock to '595 shift clock
 - I2s word clock (left/right) to '595 buffer clock.
 
-This is what RAW I2S output signals for the counter look like: word-clock (yellow), bit clock (cyan), data (purple). Notice how LSB of data is offset from word clock. ![Video](https://www.youtube.com/watch?v=Fhat7x_vPLw)
+This is what RAW I2S output signals for the counter look like: word-clock (yellow), bit clock (cyan), data (purple). Notice how LSB of data is output after the word clock rising edge.
 
-Fixed the offset (software shifing) to match the parallel outputs. This is what word-clock (yellow) and the 3LSBs (cyan=1, purple=2, blue=4) look like:
+[![IMAGE ALT TEXT HERE](http://img.youtube.com/vi/Fhat7x_vPLw/0.jpg)](http://www.youtube.com/watch?v=Fhat7x_vPLw)
+
+Fixed the offset (software shifing) to match the parallel outputs, raised the frequency a bit (just cause), plugged in the shifter board. Now this is what word-clock (yellow) and the 3LSBs (cyan=1, purple=2, blue=4) look like:
 ![image of osciloscope](https://github.com/lhartmann/esp8266_reprap/blob/master/images/Counter%20-%20Word_clock%20and%203LSBs.png?raw=true)
 
 The code and the PCB: (https://github.com/lhartmann/esp8266_reprap)
