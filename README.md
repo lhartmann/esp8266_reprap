@@ -1,6 +1,6 @@
 #ESP8266 I2S 32bit Realtime Shift Register Driver 
 
-I believe I found a way to use just an ESP8266 module to control the stepper drivers directly. This code demonstrates how.
+I believe I found a way to use just an ESP8266 module to control a set of 3D printer stepper drivers directly. This code demonstrates how.
 
 Background:
 
