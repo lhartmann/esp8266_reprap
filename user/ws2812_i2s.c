@@ -46,15 +46,8 @@ Extra copyright info:
 // 12000000L/(div*bestbck*2)
 //It is likely you could speed this up a little.
 
-#ifdef WS2812_THREE_SAMPLE
-#define WS_I2S_BCK 22  //Seems to work as low as 19, but is shakey at 18.
+#define WS_I2S_BCK 10  //Seems to work as low as 14, shoddy at 13.
 #define WS_I2S_DIV 4
-#elif defined( WS2812_FOUR_SAMPLE )
-#define WS_I2S_BCK 17  //Seems to work as low as 14, shoddy at 13.
-#define WS_I2S_DIV 4
-#else
-#error You need to either define WS2812_THREE_SAMPLE or WS2812_FOUR_SAMPLE
-#endif
 
 #ifndef i2c_bbpll
 #define i2c_bbpll                                 0x67
@@ -186,9 +179,7 @@ Extra copyright info:
 #define I2S_TX_CHAN_MOD 0x00000007
 #define I2S_TX_CHAN_MOD_S 0
 
-
 //From sdio_slv.h
-
 
 struct sdio_queue
 {
@@ -232,24 +223,19 @@ union sdio_slave_status
 #define TRIG_TOHOST_INT()	SET_PERI_REG_MASK(SLC_INTVEC_TOHOST , BIT0);\
 							CLEAR_PERI_REG_MASK(SLC_INTVEC_TOHOST , BIT0)
 
-
 ///Rest of program...
 
 //Pointer to the I2S DMA buffer data
-//static unsigned int i2sBuf[I2SDMABUFCNT][I2SDMABUFLEN];
+static unsigned int i2sBuf[I2SDMABUFCNT][I2SDMABUFLEN];
 //I2S DMA buffer descriptors
-//static struct sdio_queue i2sBufDesc[I2SDMABUFCNT];
-static struct sdio_queue i2sBufDescOut;
-static struct sdio_queue i2sBufDescZeroes;
-
-static unsigned int i2sZeroes[32];
-static unsigned int i2sBlock[WS_BLOCKSIZE/4];
+static int sdio_queue_pos = 0;
+static struct sdio_queue i2sBufDesc[I2SDMABUFCNT];
 
 //Queue which contains empty DMA buffers
 //DMA underrun counter
 
 
-#ifdef USE_2812_INTERRUPTS
+#ifdef USE_REPRAP_DMAIO_INTERRUPTS
 
 volatile uint8_t ws2812_dma_complete;
 
@@ -257,22 +243,30 @@ volatile uint8_t ws2812_dma_complete;
 //handle here is the RX_EOF_INT status, which indicate the DMA has sent a buffer whose
 //descriptor has the 'EOF' field set to 1.
 LOCAL void slc_isr(void) {
+	int i;
+	
 	//clear all intr flags
-//	WRITE_PERI_REG(SLC_INT_CLR, 0xffffffff);//slc_intr_status);
-
-//	ws2812_dma_complete = 1;
-
-	//This is a little wacky.  This function actually gets called twice.
-	//Once for the initial transfer, but by the time we tell it to stop
-	//The other zero transfer's already begun.
-//	SET_PERI_REG_MASK(SLC_RX_LINK, SLC_RXLINK_STOP);
+	WRITE_PERI_REG(SLC_INT_CLR, 0xffffffff);//slc_intr_status);
+	
+	// Iterate buffers
+	// p will point to the recently emptied buffer
+	unsigned int *p = i2sBuf[sdio_queue_pos++];
+	if (sdio_queue_pos == I2SDMABUFCNT) sdio_queue_pos = 0;
+	
+	// 
+	for (i=0; i<I2SDMABUFLEN; ++i) {
+		static unsigned int counter = 0;
+		// Correct I2S phased word clock.
+		// 1 MSB of the counter will be delayed by 1 Word-Clock cycle.
+		*p++ = (counter >> 31) | (counter << 1);
+		counter++;
+	}
 }
-
 
 #endif
 
 //Initialize I2S subsystem for DMA circular buffer use
-void ICACHE_FLASH_ATTR ws2812_init()
+void ICACHE_FLASH_ATTR reprap_dmaio_init()
 {
 	int x, y;
 	
@@ -290,37 +284,20 @@ void ICACHE_FLASH_ATTR ws2812_init()
 	SET_PERI_REG_MASK(SLC_RX_DSCR_CONF,SLC_INFOR_NO_REPLACE|SLC_TOKEN_NO_REPLACE);
 	CLEAR_PERI_REG_MASK(SLC_RX_DSCR_CONF, SLC_RX_FILL_EN|SLC_RX_EOF_MODE | SLC_RX_FILL_MODE);
 
-	i2sBufDescOut.owner = 1;
-	i2sBufDescOut.eof = 1;
-	i2sBufDescOut.sub_sof = 0;
-	i2sBufDescOut.datalen = WS_BLOCKSIZE;  //Size (in bytes)
-	i2sBufDescOut.blocksize = WS_BLOCKSIZE; //Size (in bytes)
-	i2sBufDescOut.buf_ptr=(uint32_t)&i2sBlock[0];
-	i2sBufDescOut.unused=0;
-	i2sBufDescOut.next_link_ptr=(uint32_t)&i2sBufDescZeroes; //At the end, just redirect the DMA to the zero buffer.
-
-	i2sBufDescZeroes.owner = 1;
-	i2sBufDescZeroes.eof = 1;
-	i2sBufDescZeroes.sub_sof = 0;
-	i2sBufDescZeroes.datalen = 32;
-	i2sBufDescZeroes.blocksize = 32;
-	i2sBufDescZeroes.buf_ptr=(uint32_t)&i2sZeroes[0];
-	i2sBufDescZeroes.unused=0;
-	i2sBufDescZeroes.next_link_ptr=(uint32_t)&i2sBufDescOut;
-
-
-	for( x = 0; x < 32; x++ )
-	{
-		i2sZeroes[x] = 0x00;
-	}
-	for( x = 0; x < WS_BLOCKSIZE/4; x++ )
-	{
-		i2sBlock[x] = 0x00000000;//(x == 0 || x == 999)?0xaa:0x00;
-	
-/*		uint16_t * tt = (uint16_t*)&i2sBlock[x];
-		(*(tt+0)) = 0xA0F0;
-		(*(tt+1)) = 0xC0E0;*/
-
+	// Creates a sequence of forever-looping buffers
+	for (x=0; x<I2SDMABUFCNT; ++x) {
+		i2sBufDesc[x].owner = 1;
+		i2sBufDesc[x].eof = 1; // All are EOFs and trigger interrupts
+		i2sBufDesc[x].sub_sof = 0;
+		i2sBufDesc[x].datalen = I2SDMABUFLEN * sizeof(unsigned int); //Size (in bytes)
+		i2sBufDesc[x].blocksize = I2SDMABUFLEN * sizeof(unsigned int); //Size (in bytes)
+		i2sBufDesc[x].buf_ptr=(uint32_t)i2sBuf[x];
+		i2sBufDesc[x].unused=0;
+		i2sBufDesc[x].next_link_ptr=(uint32_t)&i2sBufDesc[(x+1)%I2SDMABUFCNT];
+		
+		for( y = 0; y < I2SDMABUFLEN; ++y) {
+			i2sBuf[x][y] = 0x00000000;
+		}
 	}
 
 
@@ -328,9 +305,9 @@ void ICACHE_FLASH_ATTR ws2812_init()
 //	SET_PERI_REG_MASK(SLC_TX_LINK, ((uint32)&i2sBufDescZeroes) & SLC_TXLINK_DESCADDR_MASK); //any random desc is OK, we don't use TX but it needs something valid
 
 	CLEAR_PERI_REG_MASK(SLC_RX_LINK,SLC_RXLINK_DESCADDR_MASK);
-	SET_PERI_REG_MASK(SLC_RX_LINK, ((uint32)&i2sBufDescOut) & SLC_RXLINK_DESCADDR_MASK);
+	SET_PERI_REG_MASK(SLC_RX_LINK, ((uint32)i2sBufDesc) & SLC_RXLINK_DESCADDR_MASK);
 
-#if USE_2812_INTERRUPTS
+#ifdef USE_REPRAP_DMAIO_INTERRUPTS
 
 	//Attach the DMA interrupt
 	ets_isr_attach(ETS_SLC_INUM, slc_isr);
@@ -351,8 +328,8 @@ void ICACHE_FLASH_ATTR ws2812_init()
 
 	//Init pins to i2s functions
 	PIN_FUNC_SELECT(PERIPHS_IO_MUX_U0RXD_U, FUNC_I2SO_DATA);
-//	PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO2_U, FUNC_I2SO_WS);
-//	PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTDO_U, FUNC_I2SO_BCK);
+	PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO2_U, FUNC_I2SO_WS);
+	PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTDO_U, FUNC_I2SO_BCK);
 
 	//Enable clock to i2s subsystem
 	i2c_writeReg_Mask_def(i2c_bbpll, i2c_bbpll_en_audio_clock_out, 1);
@@ -370,7 +347,7 @@ void ICACHE_FLASH_ATTR ws2812_init()
 	//tx/rx binaureal
 //	CLEAR_PERI_REG_MASK(I2SCONF_CHAN, (I2S_TX_CHAN_MOD<<I2S_TX_CHAN_MOD_S)|(I2S_RX_CHAN_MOD<<I2S_RX_CHAN_MOD_S));
 
-#if USE_2812_INTERRUPTS
+#ifdef USE_REPRAP_DMAIO_INTERRUPTS
 
 	//Clear int
 	SET_PERI_REG_MASK(I2SINT_CLR,  
@@ -403,130 +380,3 @@ void ICACHE_FLASH_ATTR ws2812_init()
 	//Start transmission
 	SET_PERI_REG_MASK(I2SCONF,I2S_I2S_TX_START);
 }
-
-
-//All functions below this line are Public Domain 2015 Charles Lohr.
-//this code may be used by anyone in any way without restriction or limitation.
-
-#ifdef WS2812_THREE_SAMPLE
-
-static const uint16_t bitpatterns[16] = {
-	0b100100100100, 0b100100100110, 0b100100110100, 0b100100110110,
-	0b100110100100, 0b100110100110, 0b100110110100, 0b100110110110,
-	0b110100100100, 0b110100100110, 0b110100110100, 0b110100110110,
-	0b110110100100, 0b110110100110, 0b110110110100, 0b110110110110,
-};
-
-#elif defined(WS2812_FOUR_SAMPLE)
-//Tricky, send out WS2812 bits with coded pulses, one nibble, then the other.
-static const uint16_t bitpatterns[16] = {
-	0b1000100010001000, 0b1000100010001110, 0b1000100011101000, 0b1000100011101110,
-	0b1000111010001000, 0b1000111010001110, 0b1000111011101000, 0b1000111011101110,
-	0b1110100010001000, 0b1110100010001110, 0b1110100011101000, 0b1110100011101110,
-	0b1110111010001000, 0b1110111010001110, 0b1110111011101000, 0b1110111011101110,
-};
-#endif
-
-void ws2812_push( uint8_t * buffer, uint16_t buffersize )
-{
-	uint16_t place;
-
-//	while( !ws2812_dma_complete );
-
-#ifdef WS2812_THREE_SAMPLE
-	uint8_t * bufferpl = (uint8_t*)&i2sBlock[0];
-
-//	buffersize += 3;
-//	if( buffersize * 4 + 1 > WS_BLOCKSIZE ) return;
-
-	int pl = 0;
-	int quit = 0;
-
-	//Once for each led.
-	for( place = 0; !quit; place++ )
-	{
-		uint8_t b;
-		b = buffer[pl++]; uint16_t c1a = bitpatterns[(b&0x0f)]; uint16_t c1b = bitpatterns[(b>>4)];
-		b = buffer[pl++]; uint16_t c2a = bitpatterns[(b&0x0f)]; uint16_t c2b = bitpatterns[(b>>4)];
-		b = buffer[pl++]; uint16_t c3a = bitpatterns[(b&0x0f)]; uint16_t c3b = bitpatterns[(b>>4)];
-		b = buffer[pl++]; uint16_t c4a = bitpatterns[(b&0x0f)]; uint16_t c4b = bitpatterns[(b>>4)];
-
-		if( pl >= buffersize )
-		{
-			quit = 1;
-			if( pl-1 >= buffersize ) c4a = c4b = 0;
-			if( pl-2 >= buffersize ) c3a = c3b = 0;
-			if( pl-3 >= buffersize ) c2a = c2b = 0;
-			if( pl-4 >= buffersize ) c1a = c1b = 0;
-		}
-
-		//Order of bits on wire: Reverse from how they appear here.
-#define STEP1(x) (c##x##b >> 4 )
-#define STEP2(x) ((c##x##b << 4 ) | ( c##x##a>>8 ))
-#define STEP3(x) (c##x##a & 0xff )
-
-		*(bufferpl++) = STEP1(2);
-		*(bufferpl++) = STEP3(1);
-		*(bufferpl++) = STEP2(1);
-		*(bufferpl++) = STEP1(1);
-
-		*(bufferpl++) = STEP2(3);
-		*(bufferpl++) = STEP1(3);
-		*(bufferpl++) = STEP3(2);
-		*(bufferpl++) = STEP2(2);
-
-		*(bufferpl++) = STEP3(4);
-		*(bufferpl++) = STEP2(4);
-		*(bufferpl++) = STEP1(4);
-		*(bufferpl++) = STEP3(3);
-	}
-
-	while( bufferpl < &((uint8_t*)i2sBlock)[WS_BLOCKSIZE] ) *(bufferpl++) = 0;
-
-#elif defined(WS2812_FOUR_SAMPLE)
-	uint16_t * bufferpl = (uint16_t*)&i2sBlock[0];
-
-	if( buffersize * 4 > WS_BLOCKSIZE ) return;
-
-	for( place = 0; place < buffersize; place++ )
-	{
-		uint8_t btosend = buffer[place];
-		*(bufferpl++) = bitpatterns[(btosend&0x0f)];
-		*(bufferpl++) = bitpatterns[(btosend>>4)&0x0f];
-	}
-#endif
-
-#ifdef USE_2812_INTERRUPTS
-
-	uint16_t leftover = buffersize & 0x1f;
-	if( leftover ) leftover = 32 - leftover;
-	for( place = 0; place < leftover; place++ )
-	{
-		*(bufferpl++) = 0;
-		*(bufferpl++) = 0;
-	}
-
-	buffersize += leftover;
-
-	uint16_t sizeout_words = buffersize * 2;
-
-	i2sBufDescOut.owner = 1;
-	i2sBufDescOut.eof = 1;
-	i2sBufDescOut.sub_sof = 0;
-	i2sBufDescOut.datalen = sizeout_words*2;  //Size (in bytes)
-	i2sBufDescOut.blocksize = sizeout_words*2; //Size (in bytes)
-	i2sBufDescOut.buf_ptr = (uint32_t)&i2sBlock[0];
-	i2sBufDescOut.unused = 0;
-	i2sBufDescOut.next_link_ptr=(uint32_t)&i2sBufDescZeroes; //At the end, just redirect the DMA to the zero buffer.
-
-	SET_PERI_REG_MASK(SLC_RX_LINK, SLC_RXLINK_STOP);
-	CLEAR_PERI_REG_MASK(SLC_RX_LINK,SLC_RXLINK_DESCADDR_MASK);
-	SET_PERI_REG_MASK(SLC_RX_LINK, ((uint32)&i2sBufDescOut) & SLC_RXLINK_DESCADDR_MASK);
-	SET_PERI_REG_MASK(SLC_RX_LINK, SLC_RXLINK_START);
-
-#endif
-
-}
-
-
-

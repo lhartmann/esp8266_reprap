@@ -63,7 +63,6 @@ udpserver_recv(void *arg, char *pusrdata, unsigned short len)
 
 	uart0_sendStr("X");
 
-	ws2812_push( pusrdata+3, len-3 );
 
 	len -= 3;
 	if( len > sizeof(last_leds) + 3 )
@@ -124,10 +123,7 @@ void user_init(void)
 	os_timer_setfn(&some_timer, (os_timer_func_t *)myTimer, NULL);
 	os_timer_arm(&some_timer, 100, 1);
 
-	ws2812_init();
-
-	uint8_t ledout[] = { 0x00, 0xff, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x00 };
-	ws2812_push( ledout, sizeof( ledout ) );
+	reprap_dmaio_init();
 
 	system_os_post(procTaskPrio, 0, 0 );
 }
